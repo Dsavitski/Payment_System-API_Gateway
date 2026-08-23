@@ -1,36 +1,203 @@
-version: '3.8'
-
 services:
+  postgres-keycloak:
+    image: postgres:16-alpine
+    container_name: postgres-keycloak
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_keycloak_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-system-network
+
+  postgres-user:
+    image: postgres:16-alpine
+    container_name: payment_system_db
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_USER}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${POSTGRES_DB_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-system-network
+
+  postgres-order:
+    image: postgres:16-alpine
+    container_name: postgres-order
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB_ORDER}
+      POSTGRES_USER: ${POSTGRES_USER_ORDER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD_ORDER}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_order_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER_ORDER} -d ${POSTGRES_DB_ORDER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-system-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: payment_system_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - payment-system-network
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.2
+    container_name: keycloak
+    command: start-dev --import-realm
+    restart: always
+    depends_on:
+      postgres-keycloak:
+        condition: service_healthy
+    environment:
+      KC_DB: ${KC_DB}
+      KC_DB_URL: ${KC_DB_URL}
+      KC_DB_USERNAME: ${KC_DB_USERNAME}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    ports:
+      - "8081:8080"
+    volumes:
+      - ../../Payment_System-Authentification_service/keycloak/import:/opt/keycloak/data/import
+    networks:
+      - payment-system-network
+  authentication-service:
+    build:
+      context: ../../Payment_System-Authentification_service
+      dockerfile: Dockerfile
+    container_name: authentication-service
+    restart: always
+    depends_on:
+      keycloak:
+        condition: service_started
+    environment:
+      SERVER_PORT: ${AUTH_SERVER_PORT}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+      KEYCLOAK_SERVER_URL: ${KEYCLOAK_SERVER_URL}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      KEYCLOAK_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KEYCLOAK_TOKEN_URL: ${KEYCLOAK_TOKEN_URL}
+      SERVICES_USER_SERVICE_URL: ${SERVICES_USER_SERVICE_URL}
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+    ports:
+      - "8085:8085"
+    networks:
+      - payment-system-network
+
+  user-service:
+    build:
+      context: ../../Payment_System-User_Service-/userService/demo
+      dockerfile: Dockerfile
+    container_name: user-service
+    restart: always
+    depends_on:
+      postgres-user:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8082
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+      DB_URL: jdbc:postgresql://postgres-user:5432/${POSTGRES_DB_USER}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KEYCLOAK_ISSUER_URI: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+      KEYCLOAK_JWK_SET_URI: ${KEYCLOAK_JWK_SET_URI}
+    ports:
+      - "8082:8082"
+    networks:
+      - payment-system-network
+
+  order-service:
+    build:
+      context: ../../OrderService
+      dockerfile: Dockerfile
+    container_name: order-service
+    restart: always
+    depends_on:
+      postgres-order:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8083
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+      DB_URL: jdbc:postgresql://postgres-order:5432/${POSTGRES_DB_ORDER}
+      DB_USERNAME: ${POSTGRES_USER_ORDER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD_ORDER}
+      USER_SERVICE_URL: ${SERVICES_USER_SERVICE_URL}
+      KEYCLOAK_ISSUER_URI: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
+      KEYCLOAK_JWK_SET_URI: ${KEYCLOAK_JWK_SET_URI}
+    ports:
+      - "8083:8083"
+    networks:
+      - payment-system-network
+
   gateway:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: gateway
     restart: always
-    ports:
-      - "${SERVER_PORT}:${SERVER_PORT}"
+    depends_on:
+      - keycloak
+      - authentication-service
+      - user-service
+      - order-service
     environment:
-      SERVER_PORT: ${SERVER_PORT}
+      SERVER_PORT: ${GATEWAY_PORT}
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
-
       SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
-
-      SPRING_CLOUD_GATEWAY_ROUTES_0_ID: ${GATEWAY_ROUTE_0_ID}
-      SPRING_CLOUD_GATEWAY_ROUTES_0_URI: ${GATEWAY_ROUTE_0_URI}
-      SPRING_CLOUD_GATEWAY_ROUTES_0_PREDICATES_0: ${GATEWAY_ROUTE_0_PREDICATES_0}
-
-      SPRING_CLOUD_GATEWAY_ROUTES_1_ID: ${GATEWAY_ROUTE_1_ID}
-      SPRING_CLOUD_GATEWAY_ROUTES_1_URI: ${GATEWAY_ROUTE_1_URI}
-      SPRING_CLOUD_GATEWAY_ROUTES_1_PREDICATES_0: ${GATEWAY_ROUTE_1_PREDICATES_0}
-
-      SPRING_CLOUD_GATEWAY_ROUTES_2_ID: ${GATEWAY_ROUTE_2_ID}
-      SPRING_CLOUD_GATEWAY_ROUTES_2_URI: ${GATEWAY_ROUTE_2_URI}
-      SPRING_CLOUD_GATEWAY_ROUTES_2_PREDICATES_0: ${GATEWAY_ROUTE_2_PREDICATES_0}
-
+      AUTH_SERVICE_URI: ${AUTH_SERVICE_URI}
+      USER_SERVICE_URI: ${USER_SERVICE_URI}
+      ORDER_SERVICE_URI: ${ORDER_SERVICE_URI}
+    ports:
+      - "${GATEWAY_PORT}:${GATEWAY_PORT}"
     networks:
       - payment-system-network
-
 networks:
   payment-system-network:
-    external: true
-    name: payment-system-network
+    driver: bridge
+
+volumes:
+  postgres_keycloak_data:
+  postgres_data:
+  postgres_order_data:
+  redis_data:
