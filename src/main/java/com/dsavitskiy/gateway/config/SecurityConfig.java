@@ -20,6 +20,7 @@ public class SecurityConfig {
                 .pathMatchers(
                     "/api/auth/login",
                     "/api/auth/register",
+                    "/api/auth/refresh",
                     "/actuator/health",
                     "/actuator/info"
                 ).permitAll()
